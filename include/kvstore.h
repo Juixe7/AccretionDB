@@ -1,5 +1,5 @@
-#ifndef ACDB_KVSTORE_H
-#define ACDB_KVSTORE_H
+#ifndef FORGELSM_KVSTORE_H
+#define FORGELSM_KVSTORE_H
 
 #include "wal.h"
 #include "vlog.h"
@@ -17,6 +17,8 @@
 #include <limits>
 #include <shared_mutex>
 #include <deque>
+#include "options.h"
+#include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
@@ -136,7 +138,7 @@ public:
         std::condition_variable      state_cv;
         std::atomic<bool>            made_waitable{false};
     };
-    explicit KVStore(const std::string& data_dir);
+    explicit KVStore(const std::string& data_dir, const forgelsm::Options& opts = forgelsm::Options());
     ~KVStore();
 
     void put(std::string_view key, std::string_view value, const WriteOptions& options = WriteOptions());
@@ -147,7 +149,7 @@ public:
     size_t active_byte_size() const { 
         return active()->byte_size(); 
     }
-    size_t flush_threshold_bytes() const { return FLUSH_THRESHOLD; }
+
     bool   wal_tainted() const;
     size_t memtable_entries() const;
 
@@ -159,13 +161,9 @@ public:
     void subtract_user_bytes(uint64_t bytes) { metrics_.user_bytes_written -= bytes; }
 
     // ── Observability accessors (used by HttpServer) ──────────────
-    size_t l0_count()            const { 
-        if (!versions_) return 0;
-        return versions_->current()->files_[0].size(); 
-    }
-    size_t l1_count()            const { 
-        if (!versions_) return 0;
-        return versions_->current()->files_[1].size(); 
+    size_t level_file_count(int level) const {
+        if (!versions_ || level >= forgelsm::Version::MAX_LEVELS) return 0;
+        return versions_->current()->files_[level].size();
     }
     size_t l0_size() const { 
         if (!versions_) return 0;
@@ -183,6 +181,9 @@ public:
     
     // Test helper to explicitly disable bloom filter and evaluate invariant equivalence
     void bypass_bloom(bool bypass) { disable_bloom_ = bypass; }
+    void sync_active_vlog();
+    void scan(const std::string& start_key, const std::string& end_key, std::vector<std::pair<std::string, std::string>>& results) const;
+    void scan_values(const std::string& start_key, const std::string& end_key, std::vector<std::string>& results) const;
 
 private:
     void     recover();
@@ -197,7 +198,7 @@ private:
     void     maybe_flush();
     void     flush_immutable(std::shared_ptr<Memtable> imm);
     void     rotate_wal();
-    void     compact_l0_to_l1();
+    void     bg_compaction_worker();
     uint32_t next_sst_sequence() const;
 
     std::string manifest_path() const;
@@ -211,9 +212,9 @@ private:
     mutable EngineMetrics        metrics_;
     mutable std::mutex           wal_mutex_;
     std::unique_ptr<WAL>         wal_;
-    mutable acdb::ShardedLRUCache block_cache_{64 * 1024 * 1024}; // 64MB Cache
+    mutable forgelsm::ShardedLRUCache block_cache_{64 * 1024 * 1024}; // 64MB Cache
     
-    std::map<uint32_t, std::shared_ptr<VLog>> vlogs_;
+    mutable std::map<uint32_t, std::shared_ptr<VLog>> vlogs_;
     mutable std::mutex          vlogs_mutex_;
     uint32_t                                  current_vlog_id_ = 1;
     std::vector<uint32_t>                     pending_gc_vlogs_;
@@ -244,7 +245,7 @@ private:
     std::atomic<bool>            bg_compaction_running_{false};
     std::atomic<bool>            bg_flush_running_{false};
 
-    std::unique_ptr<acdb::VersionSet> versions_;
+    std::unique_ptr<forgelsm::VersionSet> versions_;
     
     // Table cache to hold loaded SSTableReaders
     mutable std::list<uint32_t> table_cache_order_;
@@ -254,12 +255,14 @@ private:
     uint32_t                     current_wal_id_ = 1;
     bool                         disable_bloom_ = false;
 
-    acdb::ThreadPool             flush_pool_{1};
-    acdb::ThreadPool             compaction_pool_{2}; 
+    forgelsm::ThreadPool             flush_pool_{1};
+    forgelsm::ThreadPool             compaction_pool_{2}; 
 
 public:
-    static size_t FLUSH_THRESHOLD;
+    const forgelsm::Options& opts() const { return opts_; }
+    size_t flush_threshold_bytes() const { return opts_.flush_threshold > 0 ? opts_.flush_threshold : 1024 * 1024; }
 private:
+    forgelsm::Options opts_;
     static constexpr size_t L0_HARD_LIMIT   = 15;
 
     std::shared_ptr<SSTableReader> get_sstable_reader(uint32_t seq) const;
@@ -268,6 +271,6 @@ private:
     friend void run_vlog_gc(KVStore* store);
 };
 
-#endif // ACDB_KVSTORE_H
+#endif // FORGELSM_KVSTORE_H
 
 

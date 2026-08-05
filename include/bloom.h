@@ -1,5 +1,5 @@
-#ifndef ACDB_BLOOM_H
-#define ACDB_BLOOM_H
+#ifndef FORGELSM_BLOOM_H
+#define FORGELSM_BLOOM_H
 
 #include <string>
 #include <string_view>
@@ -28,6 +28,7 @@ public:
     // Load method (called by SSTableReader)
     // Loads either into heap memory (< 1MB) or via mmap (>= 1MB)
     bool load(const std::string& file_path, uint64_t file_offset, uint32_t bloom_size, uint32_t k);
+    void load_raw(const uint8_t* ptr, uint32_t bloom_size, uint32_t k);
 
     // Query method
     bool may_contain(std::string_view key) const;
@@ -49,4 +50,4 @@ private:
     int   mmap_fd_ = -1;           // POSIX fd for mmap (if applicable)
 };
 
-#endif // ACDB_BLOOM_H
+#endif // FORGELSM_BLOOM_H

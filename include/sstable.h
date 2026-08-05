@@ -1,5 +1,5 @@
-#ifndef ACDB_SSTABLE_H
-#define ACDB_SSTABLE_H
+#ifndef FORGELSM_SSTABLE_H
+#define FORGELSM_SSTABLE_H
 
 #include "vlog.h"
 #include "bloom.h"
@@ -51,7 +51,7 @@ public:
     bool load(const std::string& path);
 
     // Query key. Uses cache for block lookups.
-    bool get(std::string_view key, VLogPointer& out_pointer, acdb::ShardedLRUCache* cache, EngineMetrics* metrics = nullptr) const;
+    bool get(std::string_view key, VLogPointer& out_pointer, forgelsm::ShardedLRUCache* cache, EngineMetrics* metrics = nullptr) const;
 
     uint32_t sequence() const { return sequence_; }
     const std::string& path() const { return path_; }
@@ -66,6 +66,7 @@ public:
 
     const std::vector<IndexEntry>& index() const { return index_; }
     const BloomFilter& bloom() const { return bloom_; }
+    const uint8_t* mapped_data() const { return mapped_data_; }
 
 private:
     std::string              path_;
@@ -83,4 +84,4 @@ private:
 #endif
 };
 
-#endif // ACDB_SSTABLE_H
+#endif // FORGELSM_SSTABLE_H

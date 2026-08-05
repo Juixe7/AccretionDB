@@ -1,5 +1,5 @@
-#ifndef ACDB_VLOG_GC_H
-#define ACDB_VLOG_GC_H
+#ifndef FORGELSM_VLOG_GC_H
+#define FORGELSM_VLOG_GC_H
 
 class KVStore;
 
@@ -12,4 +12,4 @@ class KVStore;
 // 5. Deletes the old VLog safely.
 void run_vlog_gc(KVStore* store);
 
-#endif // ACDB_VLOG_GC_H
+#endif // FORGELSM_VLOG_GC_H

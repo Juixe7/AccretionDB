@@ -1,12 +1,12 @@
-#ifndef ACDB_VERSION_EDIT_H
-#define ACDB_VERSION_EDIT_H
+#ifndef FORGELSM_VERSION_EDIT_H
+#define FORGELSM_VERSION_EDIT_H
 
 #include <cstdint>
 #include <string>
 #include <vector>
 #include <utility>
 
-namespace acdb {
+namespace forgelsm {
 
 struct FileMetaData {
     uint32_t sequence;
@@ -48,6 +48,6 @@ private:
     uint32_t next_file_sequence_ = 0;
 };
 
-} // namespace acdb
+} // namespace forgelsm
 
-#endif // ACDB_VERSION_EDIT_H
+#endif // FORGELSM_VERSION_EDIT_H

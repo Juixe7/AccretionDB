@@ -1,5 +1,5 @@
-#ifndef ACDB_MEMTABLE_H
-#define ACDB_MEMTABLE_H
+#ifndef FORGELSM_MEMTABLE_H
+#define FORGELSM_MEMTABLE_H
 
 #include "vlog.h"
 #include "arena.h"
@@ -31,12 +31,12 @@ public:
     size_t byte_size() const;   // Exact bytes consumed from Arena.
 
     // Provides forward-only lock-free iteration.
-    using Iterator = acdb::ConcurrentSkipList::Iterator;
+    using Iterator = forgelsm::ConcurrentSkipList::Iterator;
     Iterator begin() const;
 
 private:
-    std::unique_ptr<acdb::Arena> arena_;
-    std::unique_ptr<acdb::ConcurrentSkipList> table_;
+    std::unique_ptr<forgelsm::Arena> arena_;
+    std::unique_ptr<forgelsm::ConcurrentSkipList> table_;
 };
 
-#endif // ACDB_MEMTABLE_H
+#endif // FORGELSM_MEMTABLE_H

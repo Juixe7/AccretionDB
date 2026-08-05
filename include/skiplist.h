@@ -1,5 +1,5 @@
-#ifndef ACDB_SKIPLIST_H
-#define ACDB_SKIPLIST_H
+#ifndef FORGELSM_SKIPLIST_H
+#define FORGELSM_SKIPLIST_H
 
 #include "arena.h"
 #include "vlog.h"
@@ -7,7 +7,7 @@
 #include <string_view>
 #include <cstdint>
 
-namespace acdb {
+namespace forgelsm {
 
 // A highly concurrent SkipList optimized for an LSM-tree memtable.
 // 
@@ -60,6 +60,7 @@ public:
         std::string_view key() const;
         VLogPointer value() const;
         void seek_to_first();
+        void seek(std::string_view target);
 
     private:
         const ConcurrentSkipList* list_;
@@ -93,6 +94,6 @@ private:
     std::atomic_flag write_lock_ = ATOMIC_FLAG_INIT;
 };
 
-} // namespace acdb
+} // namespace forgelsm
 
-#endif // ACDB_SKIPLIST_H
+#endif // FORGELSM_SKIPLIST_H

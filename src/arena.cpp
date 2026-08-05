@@ -2,7 +2,7 @@
 #include <cassert>
 #include <new>
 
-namespace acdb {
+namespace forgelsm {
 
 Arena::Arena() {
     // We defer the first block allocation until the first actual allocate() call
@@ -94,4 +94,4 @@ size_t Arena::memory_usage() const {
     return bytes_allocated_.load(std::memory_order_relaxed);
 }
 
-} // namespace acdb
+} // namespace forgelsm

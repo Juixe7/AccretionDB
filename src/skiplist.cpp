@@ -3,7 +3,7 @@
 #include <cstring>
 #include <random>
 
-namespace acdb {
+namespace forgelsm {
 
 ConcurrentSkipList::ConcurrentSkipList(Arena* arena) 
     : arena_(arena), 
@@ -157,4 +157,8 @@ VLogPointer ConcurrentSkipList::Iterator::value() const {
     return node_->value.load(std::memory_order_acquire);
 }
 
-} // namespace acdb
+void ConcurrentSkipList::Iterator::seek(std::string_view target) {
+    node_ = list_->find_greater_or_equal(target, nullptr);
+}
+
+} // namespace forgelsm

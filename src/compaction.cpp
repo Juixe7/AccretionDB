@@ -19,37 +19,63 @@
 void run_compaction(KVStore* store) {
     auto start_time = std::chrono::high_resolution_clock::now();
     auto current_v = store->versions_->current();
-    if (current_v->files_[0].empty()) return;
+    
+    int source_level = -1;
+    double best_score = -1.0;
+    
+    // Check L0 score
+    size_t l0_trigger = store->opts().l0_compaction_trigger > 0 ? store->opts().l0_compaction_trigger : 4;
+    double l0_score = (double)current_v->files_[0].size() / l0_trigger;
+    if (l0_score >= 1.0) {
+        best_score = l0_score;
+        source_level = 0;
+    }
+    
+    // Check other levels
+    size_t limit = store->flush_threshold_bytes() * store->opts().level_size_multiplier;
+    for (int i = 1; i < forgelsm::Version::MAX_LEVELS - 1; ++i) {
+        size_t current_size = 0;
+        for (const auto& meta : current_v->files_[i]) current_size += meta.file_size;
+        
+        double score = (double)current_size / limit;
+        if (score >= 1.0 && score > best_score) {
+            best_score = score;
+            source_level = i;
+        }
+        limit *= store->opts().level_size_multiplier;
+    }
 
-    // 1. Snapshot inputs.
-    std::vector<acdb::FileMetaData> l0_inputs = current_v->files_[0];
+    if (source_level == -1) return;
+
+    int target_level = source_level + 1;
+    if (target_level >= forgelsm::Version::MAX_LEVELS) return;
+
+    std::vector<forgelsm::FileMetaData> src_inputs;
+    if (source_level == 0) {
+        src_inputs = current_v->files_[0]; // Pick all of L0
+    } else {
+        src_inputs.push_back(current_v->files_[source_level][0]); // Pick one file to cascade down
+    }
+
     std::string global_min = "\xFF", global_max = "";
+    for (const auto& meta : src_inputs) {
+        if (meta.min_key < global_min) global_min = meta.min_key;
+        if (meta.max_key > global_max) global_max = meta.max_key;
+    }
 
     auto get_sstable_reader = [&](uint32_t seq) -> std::shared_ptr<SSTableReader> {
         return store->get_sstable_reader(seq);
     };
 
-    for (const auto& meta : l0_inputs) {
-        if (meta.min_key < global_min) global_min = meta.min_key;
-        if (meta.max_key > global_max) global_max = meta.max_key;
-    }
-
-    // 2. Find overlapping L1 files.
-    std::vector<acdb::FileMetaData> l1_inputs;
-
-    for (const auto& meta : current_v->files_[1]) {
+    std::vector<forgelsm::FileMetaData> target_inputs;
+    for (const auto& meta : current_v->files_[target_level]) {
         auto r = get_sstable_reader(meta.sequence);
         if (!r) continue;
         if (r->overlaps(global_min, global_max)) {
-            l1_inputs.push_back(meta);
+            target_inputs.push_back(meta);
         }
     }
 
-    // 3. (Removed) We no longer collect keys from input L1 files.
-    // L1 is the terminal level in AccretionDB's 2-level LSM, so we
-    // unconditionally emit tombstones during L0->L1 compactions, avoiding O(N) memory.
-
-    // 4. Constant-Memory Streaming K-Way Merge
     struct IteratorWrapper {
         SSTableReader* reader;
         SSTableIterator* iter;
@@ -63,7 +89,7 @@ void run_compaction(KVStore* store) {
             std::string_view k2 = b.iter->key();
             if (k1 != k2) return k1 > k2;
             if (a.level != b.level) return a.level > b.level;
-            return a.seq < b.seq;
+            return a.seq < b.seq; 
         }
     };
 
@@ -71,33 +97,32 @@ void run_compaction(KVStore* store) {
     std::priority_queue<IteratorWrapper, std::vector<IteratorWrapper>, CompareIter> pq;
     std::vector<std::shared_ptr<SSTableReader>> active_readers;
 
-    for (const auto& meta : l1_inputs) {
+    for (const auto& meta : target_inputs) {
         auto r = get_sstable_reader(meta.sequence);
         if (!r) continue;
         auto iter = std::make_unique<SSTableIterator>(r.get(), &store->block_cache_);
         if (iter->valid()) {
-            pq.push({r.get(), iter.get(), 1, meta.sequence});
+            pq.push({r.get(), iter.get(), target_level, meta.sequence});
             all_iters.push_back(std::move(iter));
             active_readers.push_back(std::move(r));
         }
     }
 
-    for (const auto& meta : l0_inputs) {
+    for (const auto& meta : src_inputs) {
         auto r = get_sstable_reader(meta.sequence);
         if (!r) continue;
         auto iter = std::make_unique<SSTableIterator>(r.get(), &store->block_cache_);
         if (iter->valid()) {
-            pq.push({r.get(), iter.get(), 0, meta.sequence});
+            pq.push({r.get(), iter.get(), source_level, meta.sequence});
             all_iters.push_back(std::move(iter));
             active_readers.push_back(std::move(r));
         }
     }
 
-    // 5. Write new L1 SSTables streamingly
-    acdb::VersionEdit edit;
+    forgelsm::VersionEdit edit;
     
-    for (const auto& meta : l0_inputs) edit.delete_file(0, meta.sequence);
-    for (const auto& meta : l1_inputs) edit.delete_file(1, meta.sequence);
+    for (const auto& meta : src_inputs) edit.delete_file(source_level, meta.sequence);
+    for (const auto& meta : target_inputs) edit.delete_file(target_level, meta.sequence);
 
     std::vector<SSTableEntry> chunk;
     size_t chunk_size = 0;
@@ -108,15 +133,12 @@ void run_compaction(KVStore* store) {
         std::string path = store->sst_path(seq);
         if (!SSTableWriter::write(path, chunk)) {
             store->versions_->remove_pending_output(seq);
-            throw std::runtime_error("[Compaction] Failed to write new L1 SSTable");
+            throw std::runtime_error("[Compaction] Failed to write new SSTable");
         }
         store->add_storage_bytes(24);
         
-        SSTableReader temp_reader;
-        temp_reader.load(path);
-        
         size_t est_size = chunk_size + 24; 
-        edit.add_file(1, seq, est_size, temp_reader.min_key(), temp_reader.max_key());
+        edit.add_file(target_level, seq, est_size, chunk[0].key, chunk.back().key);
         
         chunk.clear();
         chunk_size = 0;
@@ -141,30 +163,25 @@ void run_compaction(KVStore* store) {
         last_key = current_key;
         first_key = false;
 
-        // Since L1 is the terminal level and this compaction includes ALL overlapping L1 files,
-        // any tombstone from L0 has now overshadowed and deleted any potential older value in L1.
-        // We can safely discard the tombstone entirely to prevent infinite accumulation.
-        if (is_tombstone(current_val)) continue;
+        // If target_level is MAX_LEVELS - 1, we can safely drop tombstones.
+        if (is_tombstone(current_val) && target_level == forgelsm::Version::MAX_LEVELS - 1) continue;
 
         chunk.push_back({current_key, current_val});
         chunk_size += current_key.size() + 20;
         store->add_storage_bytes(current_key.size() + 20);
-        if (chunk_size >= KVStore::FLUSH_THRESHOLD) flush_chunk();
+        if (chunk_size >= store->flush_threshold_bytes()) flush_chunk();
     }
     flush_chunk();
 
-    // Clear structures holding active readers to release file handles before deletion
     while (!pq.empty()) pq.pop();
     all_iters.clear();
     active_readers.clear();
 
-    // 7. Concurrency safe state swap
     FaultInjection::check("crash_during_compaction");
     if (!store->versions_->log_and_apply(&edit)) {
         throw std::runtime_error("[Compaction] VersionSet commit failed");
     }
     
-    // 8. Safely delete old compacted files from disk using strict MVCC.
     store->versions_->purge_obsolete_files(store->data_dir());
 
     auto end_time = std::chrono::high_resolution_clock::now();

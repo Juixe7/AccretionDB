@@ -1,6 +1,8 @@
 #include "kvstore.h"
 #include "fault_injection.h"
 #include "compaction.h"
+#include "sstable_iterator.h"
+#include <map>
 
 
 #include <algorithm>
@@ -69,10 +71,10 @@ void KVStore::scan_wal_files(std::vector<std::string>& paths, uint32_t& max_id) 
 
 // ── Constructor & Destructor ───────────────────────────────────
 
-size_t KVStore::FLUSH_THRESHOLD = 4u * 1024u * 1024u;
 
-KVStore::KVStore(const std::string& data_dir)
-    : data_dir_(data_dir), versions_(std::make_unique<acdb::VersionSet>(data_dir)) {
+
+KVStore::KVStore(const std::string& data_dir, const forgelsm::Options& opts)
+    : opts_(opts), data_dir_(data_dir), versions_(std::make_unique<forgelsm::VersionSet>(data_dir)) {
     if (false) {
         std::cerr << "[KVStore] WARNING: std::atomic<std::shared_ptr> is NOT natively lock-free on this platform. Severe performance bottleneck expected.\n";
     }
@@ -160,7 +162,7 @@ void KVStore::execute_write_request(WriteRequest* req) {
         if (!bg_compaction_running_.load()) {
             bg_compaction_running_.store(true);
             compaction_pool_.enqueue([this]() {
-                this->compact_l0_to_l1();
+                this->bg_compaction_worker();
                 {
                     std::lock_guard<std::mutex> lk(flush_wait_mutex_);
                     bg_compaction_running_.store(false);
@@ -238,6 +240,18 @@ void KVStore::execute_write_request(WriteRequest* req) {
         std::shared_ptr<VLog> active_vlog;
         {
             std::lock_guard<std::mutex> v_lock(vlogs_mutex_);
+            if (vlogs_[current_vlog_id_]->current_offset() > VLog::MAX_FILE_SIZE) {
+                vlogs_[current_vlog_id_]->sync();
+                uint32_t next_id = current_vlog_id_ + 1;
+                vlogs_[next_id] = std::make_shared<VLog>(vlog_path(next_id), next_id);
+                current_vlog_id_ = next_id;
+                
+                if (opts_.background_gc) {
+                    compaction_pool_.enqueue([this]() {
+                        run_vlog_gc(this);
+                    });
+                }
+            }
             active_vlog = vlogs_[current_vlog_id_];
         }
 
@@ -273,6 +287,15 @@ void KVStore::execute_write_request(WriteRequest* req) {
                         }
                     }
                     
+                    if (active_vlog->current_offset() >= VLog::MAX_FILE_SIZE) {
+                        std::lock_guard<std::mutex> v_lock(vlogs_mutex_);
+                        active_vlog->sync();
+                        uint32_t next_id = current_vlog_id_ + 1;
+                        vlogs_[next_id] = std::make_shared<VLog>(vlog_path(next_id), next_id);
+                        current_vlog_id_ = next_id;
+                        active_vlog = vlogs_[current_vlog_id_];
+                    }
+
                     if (!active_vlog->append(batch[i]->key, batch[i]->value, ptrs[i])) {
                         is_panic_.store(true);
                         throw std::runtime_error("ENOSPC / I/O Panic during VLog append");
@@ -280,7 +303,10 @@ void KVStore::execute_write_request(WriteRequest* req) {
                     ptrs[i].file_id = current_vlog_id_;
                     
                     user_bytes += batch[i]->key.size() + batch[i]->value.size();
-                    storage_bytes += 12 + batch[i]->key.size() + batch[i]->value.size() + 8 + batch[i]->key.size() + batch[i]->value.size();
+                    // VLog writes: Header (12) + Key + Value
+                    // WAL writes: Header (4*4 + 8 = 24) + Key. (WiscKey WAL DOES NOT store the value!)
+                    storage_bytes += (12 + batch[i]->key.size() + batch[i]->value.size()) + 
+                                     (24 + batch[i]->key.size());
                 }
             }
         }
@@ -357,16 +383,31 @@ bool KVStore::get(std::string_view key, std::string& out_value) const {
         max_idx = current_imm_idx_.load(std::memory_order_acquire);
     }
 
+    if (key == "iot_sensor_00_0000000000") {
+        std::cout << " [Debug KVStore::get] Probing key=" << key 
+                  << " | act=" << (snap_act != nullptr) 
+                  << " | imm_max=" << max_idx << "\n";
+    }
+
     // 1 & 2. Active and Immutable memtables
     {
         if (snap_act && snap_act->get(key, ptr)) {
+            if (key == "iot_sensor_00_0000000000") std::cout << " -> Found in snap_act! ptr.len=" << ptr.length << "\n";
             if (is_tombstone(ptr)) return false;
             metrics_.vlog_reads++;
             std::shared_ptr<VLog> target;
             {
                 std::lock_guard<std::mutex> v_lk(vlogs_mutex_);
                 auto it = vlogs_.find(ptr.file_id);
-                if (it != vlogs_.end()) target = it->second;
+                if (it != vlogs_.end()) {
+                    target = it->second;
+                } else {
+                    std::string vp = vlog_path(ptr.file_id);
+                    if (std::filesystem::exists(vp)) {
+                        target = std::make_shared<VLog>(vp, ptr.file_id);
+                        vlogs_[ptr.file_id] = target;
+                    }
+                }
             }
             return target ? target->read_at(ptr, out_value) : false;
         }
@@ -380,7 +421,15 @@ bool KVStore::get(std::string_view key, std::string& out_value) const {
                 {
                     std::lock_guard<std::mutex> v_lk(vlogs_mutex_);
                     auto it = vlogs_.find(ptr.file_id);
-                    if (it != vlogs_.end()) target = it->second;
+                    if (it != vlogs_.end()) {
+                        target = it->second;
+                    } else {
+                        std::string vp = vlog_path(ptr.file_id);
+                        if (std::filesystem::exists(vp)) {
+                            target = std::make_shared<VLog>(vp, ptr.file_id);
+                            vlogs_[ptr.file_id] = target;
+                        }
+                    }
                 }
                 return target ? target->read_at(ptr, out_value) : false;
             }
@@ -391,44 +440,23 @@ bool KVStore::get(std::string_view key, std::string& out_value) const {
 
     bool found_in_sst = false;
 
-    // 3. L0 SSTables
-    for (const auto& meta : current_v->files_[0]) {
-        if (key < meta.min_key || key > meta.max_key) continue;
-        metrics_.sst_considered++;
-        auto sst = get_sstable_reader(meta.sequence);
-        if (!sst) continue;
-
-        if (!disable_bloom_ && !sst->bloom().may_contain(key)) {
-            metrics_.bloom_skips++;
-            continue;
-        }
-        
-        metrics_.sst_searches++;
-        if (sst->get(key, ptr, &block_cache_, &metrics_)) {
-            found_in_sst = true;
-            break;
-        }
-    }
-
-    // 4. L1 SSTables
-    if (!found_in_sst) {
-        for (const auto& meta : current_v->files_[1]) {
+    // 3. LSM-Tree Levels
+    for (int level = 0; level < forgelsm::Version::MAX_LEVELS && !found_in_sst; ++level) {
+        for (const auto& meta : current_v->files_[level]) {
             if (key < meta.min_key || key > meta.max_key) continue;
+            metrics_.sst_considered++;
             auto sst = get_sstable_reader(meta.sequence);
             if (!sst) continue;
 
-            if (sst->overlaps(key, key)) {
-                metrics_.sst_considered++;
-                if (!disable_bloom_ && !sst->bloom().may_contain(key)) {
-                    metrics_.bloom_skips++;
-                    continue;
-                }
-                
-                metrics_.sst_searches++;
-                if (sst->get(key, ptr, &block_cache_, &metrics_)) {
-                    found_in_sst = true;
-                    break;
-                }
+            if (!disable_bloom_ && !sst->bloom().may_contain(key)) {
+                metrics_.bloom_skips++;
+                continue;
+            }
+            
+            metrics_.sst_searches++;
+            if (sst->get(key, ptr, &block_cache_, &metrics_)) {
+                found_in_sst = true;
+                break;
             }
         }
     }
@@ -440,7 +468,15 @@ bool KVStore::get(std::string_view key, std::string& out_value) const {
         {
             std::lock_guard<std::mutex> lk(vlogs_mutex_);
             auto it = vlogs_.find(ptr.file_id);
-            if (it != vlogs_.end()) target = it->second;
+            if (it != vlogs_.end()) {
+                target = it->second;
+            } else {
+                std::string vp = vlog_path(ptr.file_id);
+                if (std::filesystem::exists(vp)) {
+                    target = std::make_shared<VLog>(vp, ptr.file_id);
+                    vlogs_[ptr.file_id] = target;
+                }
+            }
         }
         return target ? target->read_at(ptr, out_value) : false;
     }
@@ -479,32 +515,17 @@ bool KVStore::get_pointer(std::string_view key, VLogPointer& out_ptr) const {
     auto current_v = versions_->current();
     bool found_in_sst = false;
 
-    // 3. L0 SSTables
-    for (const auto& meta : current_v->files_[0]) {
-        if (key < meta.min_key || key > meta.max_key) continue;
-        auto sst = get_sstable_reader(meta.sequence);
-        if (!sst) continue;
-
-        if (!disable_bloom_ && !sst->bloom().may_contain(key)) continue;
-        if (sst->get(key, out_ptr, &block_cache_, &metrics_)) {
-            found_in_sst = true;
-            break;
-        }
-    }
-
-    // 4. L1 SSTables
-    if (!found_in_sst) {
-        for (const auto& meta : current_v->files_[1]) {
+    // 3. LSM-Tree Levels
+    for (int level = 0; level < forgelsm::Version::MAX_LEVELS && !found_in_sst; ++level) {
+        for (const auto& meta : current_v->files_[level]) {
             if (key < meta.min_key || key > meta.max_key) continue;
             auto sst = get_sstable_reader(meta.sequence);
             if (!sst) continue;
 
-            if (sst->overlaps(key, key)) {
-                if (!disable_bloom_ && !sst->bloom().may_contain(key)) continue;
-                if (sst->get(key, out_ptr, &block_cache_, &metrics_)) {
-                    found_in_sst = true;
-                    break;
-                }
+            if (!disable_bloom_ && !sst->bloom().may_contain(key)) continue;
+            if (sst->get(key, out_ptr, &block_cache_, nullptr)) {
+                found_in_sst = true;
+                break;
             }
         }
     }
@@ -544,20 +565,6 @@ void KVStore::maybe_flush() {
 
     rotate_wal(); 
     
-    // Rotate VLog if it gets too large
-    {
-        std::unique_lock<std::mutex> v_lock(vlogs_mutex_);
-        if (vlogs_[current_vlog_id_]->current_offset() > FLUSH_THRESHOLD * 2) {
-            uint32_t next_id = current_vlog_id_ + 1;
-            vlogs_[next_id] = std::make_shared<VLog>(vlog_path(next_id), next_id);
-            current_vlog_id_ = next_id;
-            
-            // compaction_pool_.enqueue([this]() {
-            //     run_vlog_gc(this);
-            // });
-        }
-    }
-
     flush_pool_.enqueue([this, act, target_slot]() {
         try {
             this->flush_immutable(act);
@@ -611,8 +618,8 @@ void KVStore::flush_immutable(std::shared_ptr<Memtable> imm) {
     }
 
     {
-        acdb::VersionEdit edit;
-        edit.add_file(0, seq, sst_est, reader.min_key(), reader.max_key());
+        forgelsm::VersionEdit edit;
+        edit.add_file(0, seq, sst_est, entries_to_flush[0].key, entries_to_flush.back().key);
         
         FaultInjection::check("crash_during_flush");
 
@@ -634,12 +641,12 @@ void KVStore::flush_immutable(std::shared_ptr<Memtable> imm) {
         if (versions_->current()->files_[0].size() >= 4 && !bg_compaction_running_.load()) {
             bg_compaction_running_.store(true);
             compaction_pool_.enqueue([this]() {
-                this->compact_l0_to_l1();
+                this->bg_compaction_worker();
                 {
                     std::lock_guard<std::mutex> lk(flush_wait_mutex_);
                     bg_compaction_running_.store(false);
                 }
-                bg_compaction_cv_.notify_all();
+                bg_flush_cv_.notify_all();
                 bg_flush_cv_.notify_all();
             });
         }
@@ -809,6 +816,7 @@ std::shared_ptr<SSTableReader> KVStore::get_sstable_reader(uint32_t seq) const {
     std::string path = sst_path(seq);
     auto reader = std::make_shared<SSTableReader>();
     if (!reader->load(path)) {
+        std::cerr << " [Error] get_sstable_reader failed to load SSTable: " << path << "\n";
         return nullptr;
     }
     
@@ -831,8 +839,30 @@ std::shared_ptr<SSTableReader> KVStore::get_sstable_reader(uint32_t seq) const {
     return reader;
 }
 
-void KVStore::compact_l0_to_l1() {
-    run_compaction(this);
+void KVStore::bg_compaction_worker() {
+    while (true) {
+        auto current_v = versions_->current();
+        double best_score = -1.0;
+        
+        size_t l0_trigger = opts().l0_compaction_trigger > 0 ? opts().l0_compaction_trigger : 4;
+        double l0_score = (double)current_v->files_[0].size() / l0_trigger;
+        if (l0_score >= 1.0) best_score = l0_score;
+        
+        size_t limit = flush_threshold_bytes() * opts().level_size_multiplier;
+        for (int i = 1; i < forgelsm::Version::MAX_LEVELS - 1; ++i) {
+            size_t current_size = 0;
+            for (const auto& meta : current_v->files_[i]) current_size += meta.file_size;
+            double score = (double)current_size / limit;
+            if (score >= 1.0 && score > best_score) best_score = score;
+            limit *= opts().level_size_multiplier;
+        }
+
+        if (best_score < 1.0) {
+            break;
+        }
+
+        run_compaction(this);
+    }
 }
 
 // ── Diagnostics ────────────────────────────────────────────────
@@ -864,6 +894,168 @@ size_t KVStore::memtable_entries() const {
         }
     }
     return count;
+}
+
+void KVStore::scan(const std::string& start_key, const std::string& end_key, std::vector<std::pair<std::string, std::string>>& results) const {
+    results.clear();
+    
+    // We will collect pointers into a map to deduplicate and sort keys.
+    // By querying newest to oldest and using map::insert (which does not overwrite),
+    // we correctly keep the newest version of each key.
+    std::map<std::string, VLogPointer, std::less<>> merged;
+
+    auto add_from_iterator = [&](auto& it) {
+        it.seek(start_key);
+        while (it.valid() && it.key() <= end_key) {
+            merged.insert({std::string(it.key()), it.value()});
+            it.next();
+        }
+    };
+
+    // 1. Active Memtable
+    std::shared_ptr<Memtable> act;
+    std::shared_ptr<Memtable> snap_imm[4];
+    {
+        std::lock_guard<std::mutex> mem_lk(memtable_mutex_);
+        act = active_;
+        for (int i = 0; i < 4; ++i) snap_imm[i] = immutables_[i];
+    }
+    
+    if (act) {
+        auto it = act->begin();
+        add_from_iterator(it);
+    }
+    
+    // 2. Immutable Memtables (0 is newest)
+    for (int i = 0; i < 4; ++i) {
+        if (snap_imm[i]) {
+            auto it = snap_imm[i]->begin();
+            add_from_iterator(it);
+        }
+    }
+
+    // LSM-Tree Levels (from current version)
+    auto v = versions_->current();
+    for (int level = 0; level < forgelsm::Version::MAX_LEVELS; ++level) {
+        for (const auto& meta : v->files_[level]) {
+            if (meta.max_key < start_key || meta.min_key > end_key) continue;
+            auto reader_ptr = const_cast<KVStore*>(this)->get_sstable_reader(meta.sequence);
+            if (reader_ptr) {
+                SSTableIterator it(reader_ptr.get(), &block_cache_);
+                add_from_iterator(it);
+            }
+        }
+    }
+
+    // Resolve VLogPointers and populate results
+    for (const auto& [key, ptr] : merged) {
+        // If the pointer length is 0 (and it points to a WAL), it's a tombstone.
+        if (ptr.length == 0 && ptr.offset == std::numeric_limits<uint64_t>::max()) {
+            continue;
+        }
+        
+        std::string val;
+        bool found = false;
+        
+        // Find the appropriate VLog
+        std::shared_ptr<VLog> target_vlog;
+        {
+            std::lock_guard<std::mutex> v_lock(vlogs_mutex_);
+            auto it = vlogs_.find(ptr.file_id);
+            if (it != vlogs_.end()) {
+                target_vlog = it->second;
+            }
+        }
+        
+        if (target_vlog) {
+            found = target_vlog->read_at(ptr, val);
+            metrics_.vlog_reads.fetch_add(1, std::memory_order_relaxed);
+        }
+        
+        if (found) {
+            results.emplace_back(key, val);
+        }
+    }
+}
+
+void KVStore::sync_active_vlog() {
+    std::lock_guard<std::mutex> v_lock(vlogs_mutex_);
+    if (vlogs_.count(current_vlog_id_) && vlogs_[current_vlog_id_]) {
+        vlogs_[current_vlog_id_]->sync();
+    }
+}
+
+void KVStore::scan_values(const std::string& start_key, const std::string& end_key, std::vector<std::string>& results) const {
+    results.clear();
+    std::map<std::string, VLogPointer, std::less<>> merged;
+
+    auto add_from_iterator = [&](auto& it) {
+        it.seek(start_key);
+        while (it.valid() && it.key() <= end_key) {
+            merged.insert({std::string(it.key()), it.value()});
+            it.next();
+        }
+    };
+
+    std::shared_ptr<Memtable> act;
+    std::shared_ptr<Memtable> snap_imm[4];
+    {
+        std::lock_guard<std::mutex> mem_lk(memtable_mutex_);
+        act = active_;
+        for (int i = 0; i < 4; ++i) snap_imm[i] = immutables_[i];
+    }
+    
+    if (act) {
+        auto it = act->begin();
+        add_from_iterator(it);
+    }
+    
+    for (int i = 0; i < 4; ++i) {
+        if (snap_imm[i]) {
+            auto it = snap_imm[i]->begin();
+            add_from_iterator(it);
+        }
+    }
+
+    // LSM-Tree Levels (from current version)
+    auto v = versions_->current();
+    for (int level = 0; level < forgelsm::Version::MAX_LEVELS; ++level) {
+        for (const auto& meta : v->files_[level]) {
+            if (meta.max_key < start_key || meta.min_key > end_key) continue;
+            auto reader_ptr = const_cast<KVStore*>(this)->get_sstable_reader(meta.sequence);
+            if (reader_ptr) {
+                SSTableIterator it(reader_ptr.get(), &block_cache_);
+                add_from_iterator(it);
+            }
+        }
+    }
+
+    for (const auto& [key, ptr] : merged) {
+        if (ptr.length == 0 && ptr.offset == std::numeric_limits<uint64_t>::max()) {
+            continue;
+        }
+        
+        std::string val;
+        bool found = false;
+        
+        std::shared_ptr<VLog> target_vlog;
+        {
+            std::lock_guard<std::mutex> v_lock(vlogs_mutex_);
+            auto it = vlogs_.find(ptr.file_id);
+            if (it != vlogs_.end()) {
+                target_vlog = it->second;
+            }
+        }
+        
+        if (target_vlog) {
+            found = target_vlog->read_at(ptr, val);
+            metrics_.vlog_reads.fetch_add(1, std::memory_order_relaxed);
+        }
+        
+        if (found) {
+            results.emplace_back(std::move(val));
+        }
+    }
 }
 
 

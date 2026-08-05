@@ -130,6 +130,14 @@ void BloomFilter::build(const std::vector<std::string>& keys, double fp_rate) {
     mmap_ptr_ = bits_.data();
 }
 
+void BloomFilter::load_raw(const uint8_t* ptr, uint32_t bloom_size, uint32_t k) {
+    cleanup();
+    if (bloom_size == 0 || !ptr) return;
+    k_ = k;
+    m_ = static_cast<uint64_t>(bloom_size) * 8;
+    mmap_ptr_ = ptr;
+}
+
 bool BloomFilter::load(const std::string& file_path, uint64_t file_offset, uint32_t bloom_size, uint32_t k) {
     cleanup();
     if (bloom_size == 0) return true;

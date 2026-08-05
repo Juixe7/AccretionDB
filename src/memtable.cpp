@@ -1,8 +1,8 @@
 #include "memtable.h"
 
 Memtable::Memtable() 
-    : arena_(std::make_unique<acdb::Arena>()),
-      table_(std::make_unique<acdb::ConcurrentSkipList>(arena_.get())) {}
+    : arena_(std::make_unique<forgelsm::Arena>()),
+      table_(std::make_unique<forgelsm::ConcurrentSkipList>(arena_.get())) {}
 
 Memtable::~Memtable() = default;
 

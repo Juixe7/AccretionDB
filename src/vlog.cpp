@@ -15,9 +15,8 @@
   #define VLOG_FD_TYPE HANDLE
   #define VLOG_INVALID_FD INVALID_HANDLE_VALUE
   inline HANDLE vlog_open(const char* p, int f, int) {
-      DWORD access = 0;
+      DWORD access = GENERIC_READ;
       if (f & 1) access |= GENERIC_WRITE;
-      if (f & 2) access |= GENERIC_READ;
       DWORD creation = (f & 8) ? OPEN_ALWAYS : OPEN_EXISTING;
       HANDLE h = CreateFileA(p, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, creation, FILE_ATTRIBUTE_NORMAL, NULL);
       if (h != INVALID_HANDLE_VALUE && (f & 8)) {
@@ -103,14 +102,20 @@ VLog::VLog(const std::string& path, uint32_t file_id)
     buffer_.reserve(8 * 1024 * 1024); // Preallocate 8MB
 }
 
-VLog::~VLog() {
+void VLog::close_files() {
     if ((VLOG_FD_TYPE)write_fd_ != VLOG_INVALID_FD) {
         sync();
         vlog_close((VLOG_FD_TYPE)write_fd_);
+        write_fd_ = (intptr_t)VLOG_INVALID_FD;
     }
-    if ((VLOG_FD_TYPE)read_fd_  != VLOG_INVALID_FD) vlog_close((VLOG_FD_TYPE)read_fd_);
-    write_fd_ = (intptr_t)VLOG_INVALID_FD;
-    read_fd_ = (intptr_t)VLOG_INVALID_FD;
+    if ((VLOG_FD_TYPE)read_fd_ != VLOG_INVALID_FD) {
+        vlog_close((VLOG_FD_TYPE)read_fd_);
+        read_fd_ = (intptr_t)VLOG_INVALID_FD;
+    }
+}
+
+VLog::~VLog() {
+    close_files();
     
     if (marked_for_deletion_) {
         std::error_code ec;
@@ -145,9 +150,10 @@ bool VLog::append(std::string_view key, std::string_view value, VLogPointer& out
     out_pointer.offset  = write_offset + header_size + key_size;
     out_pointer.length  = value_size;
     
+    if (buffer_.size() >= 4 * 1024 * 1024) {
+        sync();
+    }
 
-
-    
     return true;
 }
 
@@ -179,11 +185,11 @@ bool VLog::sync() {
 // Read value at pointer.
 // Safely implemented using concurrent lock-free reads.
 bool VLog::read_at(const VLogPointer& pointer, std::string& out_value) const {
-    if (read_fd_ < 0) return false;
+    intptr_t fd = (write_fd_ != (intptr_t)VLOG_INVALID_FD) ? write_fd_ : read_fd_;
+    if (fd == (intptr_t)VLOG_INVALID_FD) return false;
     
-    // Read value bytes directly from pointer.offset
     out_value.resize(pointer.length);
-    if (pointer.length > 0 && !acdb::platform_pread(read_fd_, out_value.data(), pointer.length, pointer.offset))
+    if (pointer.length > 0 && !forgelsm::platform_pread(fd, out_value.data(), pointer.length, pointer.offset))
         return false;
 
     return true;
@@ -191,7 +197,7 @@ bool VLog::read_at(const VLogPointer& pointer, std::string& out_value) const {
 
 bool VLog::read_next(uint64_t& current_offset, VLogRecord& out_record) const {
     uint32_t headers[2] = {0, 0};
-    if (!acdb::platform_pread(read_fd_, headers, sizeof(headers), current_offset)) {
+    if (!forgelsm::platform_pread(read_fd_, headers, sizeof(headers), current_offset)) {
         return false; // EOF or error
     }
     
@@ -201,11 +207,11 @@ bool VLog::read_next(uint64_t& current_offset, VLogRecord& out_record) const {
     out_record.key.resize(key_size);
     out_record.value.resize(value_size);
     
-    if (key_size > 0 && !acdb::platform_pread(read_fd_, out_record.key.data(), key_size, current_offset + sizeof(uint32_t) * 2)) {
+    if (key_size > 0 && !forgelsm::platform_pread(read_fd_, out_record.key.data(), key_size, current_offset + sizeof(uint32_t) * 2)) {
         return false;
     }
     
-    if (value_size > 0 && !acdb::platform_pread(read_fd_, out_record.value.data(), value_size, current_offset + sizeof(uint32_t) * 2 + key_size)) {
+    if (value_size > 0 && !forgelsm::platform_pread(read_fd_, out_record.value.data(), value_size, current_offset + sizeof(uint32_t) * 2 + key_size)) {
         return false;
     }
     

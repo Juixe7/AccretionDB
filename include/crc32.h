@@ -1,5 +1,5 @@
-#ifndef ACDB_CRC32_H
-#define ACDB_CRC32_H
+#ifndef FORGELSM_CRC32_H
+#define FORGELSM_CRC32_H
 
 #include <cstdint>
 #include <string>
@@ -15,4 +15,4 @@ uint32_t compute_crc32_incremental(uint32_t crc, const uint8_t* data, size_t len
 uint32_t record_checksum(uint32_t key_size, uint32_t vlog_id, uint64_t vlog_offset, uint32_t vlog_len,
                          std::string_view key);
 
-#endif // ACDB_CRC32_H
+#endif // FORGELSM_CRC32_H

@@ -1,5 +1,5 @@
-#ifndef ACDB_CACHE_H
-#define ACDB_CACHE_H
+#ifndef FORGELSM_CACHE_H
+#define FORGELSM_CACHE_H
 
 #include <cstdint>
 #include <string>
@@ -9,7 +9,7 @@
 #include <memory>
 #include <mutex>
 
-namespace acdb {
+namespace forgelsm {
 
 // A block is just a chunk of bytes.
 using Block = std::vector<char>;
@@ -102,6 +102,6 @@ private:
     }
 };
 
-} // namespace acdb
+} // namespace forgelsm
 
-#endif // ACDB_CACHE_H
+#endif // FORGELSM_CACHE_H

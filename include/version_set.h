@@ -1,5 +1,5 @@
-#ifndef ACDB_VERSION_SET_H
-#define ACDB_VERSION_SET_H
+#ifndef FORGELSM_VERSION_SET_H
+#define FORGELSM_VERSION_SET_H
 
 #include "version_edit.h"
 #include <atomic>
@@ -10,11 +10,12 @@
 #include <vector>
 #include <set>
 
-namespace acdb {
+namespace forgelsm {
 
 class Version {
 public:
-    std::vector<FileMetaData> files_[2]; // Level 0 and Level 1
+    static const int MAX_LEVELS = 6;
+    std::vector<FileMetaData> files_[MAX_LEVELS]; // Levels 0 through 5
 };
 
 class VersionSet {
@@ -54,7 +55,7 @@ private:
     std::string db_name_;
     std::atomic<uint32_t> next_file_number_{1};
     std::shared_ptr<Version> current_;
-    std::vector<std::weak_ptr<Version>> active_versions_;
+    mutable std::vector<std::weak_ptr<Version>> active_versions_;
     std::set<uint32_t> pending_outputs_;
 
     mutable std::mutex mutex_;
@@ -65,6 +66,6 @@ private:
     void append_version(std::shared_ptr<Version> v);
 };
 
-} // namespace acdb
+} // namespace forgelsm
 
-#endif // ACDB_VERSION_SET_H
+#endif // FORGELSM_VERSION_SET_H

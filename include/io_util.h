@@ -1,5 +1,5 @@
-#ifndef ACDB_IO_UTIL_H
-#define ACDB_IO_UTIL_H
+#ifndef FORGELSM_IO_UTIL_H
+#define FORGELSM_IO_UTIL_H
 
 #include <cstdint>
 #include <cstddef>
@@ -8,23 +8,24 @@
 #ifdef _WIN32
   #include <windows.h>
   #include <io.h>
+  #include <iostream>
 #else
   #include <unistd.h>
   #include <errno.h>
 #endif
 
-namespace acdb {
+namespace forgelsm {
 
 inline bool platform_pread(intptr_t fd, void* buf, size_t count, uint64_t offset) {
 #ifdef _WIN32
     HANDLE h = (HANDLE)fd;
     if (h == INVALID_HANDLE_VALUE) return false;
-    OVERLAPPED ov;
-    memset(&ov, 0, sizeof(ov));
-    ov.Offset = static_cast<DWORD>(offset & 0xFFFFFFFF);
-    ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
+    OVERLAPPED ol = {0};
+    ol.Offset = (DWORD)(offset & 0xFFFFFFFF);
+    ol.OffsetHigh = (DWORD)(offset >> 32);
     DWORD read_bytes = 0;
-    return ReadFile(h, buf, static_cast<DWORD>(count), &read_bytes, &ov) && read_bytes == count;
+    bool ok = ReadFile(h, buf, static_cast<DWORD>(count), &read_bytes, &ol);
+    return ok && read_bytes == count;
 #else
     uint8_t* p = static_cast<uint8_t*>(buf);
     size_t rem = count;
@@ -44,6 +45,6 @@ inline bool platform_pread(intptr_t fd, void* buf, size_t count, uint64_t offset
 #endif
 }
 
-} // namespace acdb
+} // namespace forgelsm
 
-#endif // ACDB_IO_UTIL_H
+#endif // FORGELSM_IO_UTIL_H

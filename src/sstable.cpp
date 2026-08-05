@@ -35,6 +35,8 @@ bool SSTableWriter::write(const std::string& path,
     int restart_interval = 16;
     int counter = 0;
 
+    uint32_t checksum = 0;
+
     auto flush_block_buf = [&]() -> bool {
         if (block_buf.empty()) return true;
         
@@ -43,11 +45,12 @@ bool SSTableWriter::write(const std::string& path,
             std::memcpy(temp, &r, 4);
             block_buf.insert(block_buf.end(), temp, temp + 4);
         }
-        uint32_t nr = restarts.size();
+        uint32_t nr = static_cast<uint32_t>(restarts.size());
         uint8_t temp[4];
         std::memcpy(temp, &nr, 4);
         block_buf.insert(block_buf.end(), temp, temp + 4);
 
+        checksum = compute_crc32_incremental(checksum, block_buf.data(), block_buf.size());
         out.write(reinterpret_cast<const char*>(block_buf.data()), static_cast<std::streamsize>(block_buf.size()));
         if (out.fail()) return false;
         
@@ -101,7 +104,7 @@ bool SSTableWriter::write(const std::string& path,
         std::memcpy(p, entry.key.data() + shared, unshared); p += unshared;
         std::memcpy(p, &entry.pointer.file_id, 4); p += 4;
         std::memcpy(p, &entry.pointer.offset, 8); p += 8;
-        std::memcpy(p, &entry.pointer.length, 4);
+        std::memcpy(p, &entry.pointer.length, 4); p += 4;
 
         last_key = entry.key;
         counter++;
@@ -115,9 +118,17 @@ bool SSTableWriter::write(const std::string& path,
     uint32_t index_offset = current_offset;
     for (const auto& idx : index) {
         uint32_t ks = static_cast<uint32_t>(idx.max_key.size());
+        
+        checksum = compute_crc32_incremental(checksum, reinterpret_cast<const uint8_t*>(&ks), 4);
         out.write(reinterpret_cast<const char*>(&ks), sizeof(uint32_t));
+        
+        checksum = compute_crc32_incremental(checksum, reinterpret_cast<const uint8_t*>(idx.max_key.data()), ks);
         out.write(idx.max_key.data(), ks);
+        
+        checksum = compute_crc32_incremental(checksum, reinterpret_cast<const uint8_t*>(&idx.offset), 4);
         out.write(reinterpret_cast<const char*>(&idx.offset), sizeof(uint32_t));
+        
+        checksum = compute_crc32_incremental(checksum, reinterpret_cast<const uint8_t*>(&idx.length), 4);
         out.write(reinterpret_cast<const char*>(&idx.length), sizeof(uint32_t));
     }
     if (out.fail()) return false;
@@ -132,35 +143,24 @@ bool SSTableWriter::write(const std::string& path,
 
     uint32_t bloom_offset = index_end;
     uint32_t k = bloom.num_hashes();
+    
+    checksum = compute_crc32_incremental(checksum, reinterpret_cast<const uint8_t*>(&k), 4);
     out.write(reinterpret_cast<const char*>(&k), 4);
+    
+    checksum = compute_crc32_incremental(checksum, bloom.data().data(), bloom.data().size());
     out.write(reinterpret_cast<const char*>(bloom.data().data()), static_cast<std::streamsize>(bloom.data().size()));
     if (out.fail()) return false;
+    
     uint32_t bloom_size_total = 4 + static_cast<uint32_t>(bloom.data().size());
 
-    uint32_t current_file_size = static_cast<uint32_t>(out.tellp());
+    out.write(reinterpret_cast<const char*>(&index_offset), sizeof(uint32_t));
+    out.write(reinterpret_cast<const char*>(&bloom_offset), sizeof(uint32_t));
+    out.write(reinterpret_cast<const char*>(&bloom_size_total), sizeof(uint32_t));
+    out.write(reinterpret_cast<const char*>(&checksum), sizeof(uint32_t));
+    
     out.flush();
     if (out.fail()) return false;
     out.close();
-    
-    std::ifstream in(path, std::ios::binary);
-    uint32_t checksum = 0; 
-    char buf[4096];
-    while (in.read(buf, sizeof(buf))) {
-        checksum = compute_crc32_incremental(checksum, reinterpret_cast<const uint8_t*>(buf), sizeof(buf));
-    }
-    if (in.gcount() > 0) {
-        checksum = compute_crc32_incremental(checksum, reinterpret_cast<const uint8_t*>(buf), in.gcount());
-    }
-    in.close();
-
-    std::ofstream out2(path, std::ios::binary | std::ios::app);
-    out2.write(reinterpret_cast<const char*>(&index_offset), sizeof(uint32_t));
-    out2.write(reinterpret_cast<const char*>(&bloom_offset), sizeof(uint32_t));
-    out2.write(reinterpret_cast<const char*>(&bloom_size_total), sizeof(uint32_t));
-    out2.write(reinterpret_cast<const char*>(&checksum), sizeof(uint32_t));
-    out2.flush();
-    if (out2.fail()) return false;
-    out2.close();
 
     return true;
 }
@@ -180,17 +180,29 @@ bool SSTableReader::load(const std::string& path) {
     
 #ifdef _WIN32
     hFile_ = CreateFileA(path_.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile_ == INVALID_HANDLE_VALUE) return false;
+    if (hFile_ == INVALID_HANDLE_VALUE) {
+        std::cerr << " [SSTable Error] CreateFileA failed for " << path_ << " err=" << GetLastError() << "\n";
+        return false;
+    }
     
     LARGE_INTEGER liSize;
-    if (!GetFileSizeEx(hFile_, &liSize)) return false;
+    if (!GetFileSizeEx(hFile_, &liSize)) {
+        std::cerr << " [SSTable Error] GetFileSizeEx failed for " << path_ << " err=" << GetLastError() << "\n";
+        return false;
+    }
     mapped_size_ = liSize.QuadPart;
     
     hMap_ = CreateFileMappingA(hFile_, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (!hMap_) return false;
+    if (!hMap_) {
+        std::cerr << " [SSTable Error] CreateFileMappingA failed for " << path_ << " err=" << GetLastError() << "\n";
+        return false;
+    }
     
     mapped_data_ = reinterpret_cast<const uint8_t*>(MapViewOfFile(hMap_, FILE_MAP_READ, 0, 0, 0));
-    if (!mapped_data_) return false;
+    if (!mapped_data_) {
+        std::cerr << " [SSTable Error] MapViewOfFile failed for " << path_ << " err=" << GetLastError() << "\n";
+        return false;
+    }
     
     size_t file_size = mapped_size_;
     if (file_size < 16) return false;
@@ -234,7 +246,7 @@ bool SSTableReader::load(const std::string& path) {
         uint32_t k;
         std::memcpy(&k, mapped_data_ + bloom_offset, 4);
         uint32_t actual_bloom_size = bloom_size_total - 4;
-        bloom_.load(path, bloom_offset + 4, actual_bloom_size, k);
+        bloom_.load_raw(mapped_data_ + bloom_offset + 4, actual_bloom_size, k);
     }
     return true;
 #else
@@ -323,7 +335,7 @@ SSTableReader::~SSTableReader() {
 #endif
 }
 
-bool SSTableReader::get(std::string_view key, VLogPointer& out_pointer, acdb::ShardedLRUCache* cache, EngineMetrics* metrics) const {
+bool SSTableReader::get(std::string_view key, VLogPointer& out_pointer, forgelsm::ShardedLRUCache* cache, EngineMetrics* metrics) const {
     if (key < min_key_ || key > max_key_) return false;
 
     auto it = std::lower_bound(index_.begin(), index_.end(), key,
@@ -339,14 +351,14 @@ bool SSTableReader::get(std::string_view key, VLogPointer& out_pointer, acdb::Sh
     size_t block_size = it->length;
 #else
     std::string cache_key = path_ + ":" + std::to_string(it->offset);
-    acdb::BlockPtr block = cache->get(cache_key);
+    forgelsm::BlockPtr block = cache->get(cache_key);
 
     if (block) {
         if (metrics) metrics->block_cache_hits.fetch_add(1, std::memory_order_relaxed);
     } else {
         if (metrics) metrics->block_cache_misses.fetch_add(1, std::memory_order_relaxed);
-        block = std::make_shared<acdb::Block>(it->length);
-        if (fd_ >= 0 && acdb::platform_pread(fd_, block->data(), it->length, it->offset)) {
+        block = std::make_shared<forgelsm::Block>(it->length);
+        if (fd_ >= 0 && forgelsm::platform_pread(fd_, block->data(), it->length, it->offset)) {
             cache->put(cache_key, block);
         } else {
             return false;

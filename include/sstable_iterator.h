@@ -1,5 +1,5 @@
-#ifndef ACDB_SSTABLE_ITERATOR_H
-#define ACDB_SSTABLE_ITERATOR_H
+#ifndef FORGELSM_SSTABLE_ITERATOR_H
+#define FORGELSM_SSTABLE_ITERATOR_H
 
 #include "sstable.h"
 #include "cache.h"
@@ -12,7 +12,7 @@
 
 class SSTableIterator {
 public:
-    SSTableIterator(const SSTableReader* reader, acdb::ShardedLRUCache* cache)
+    SSTableIterator(const SSTableReader* reader, forgelsm::ShardedLRUCache* cache)
         : reader_(reader), cache_(cache) {
         if (reader_) {
             in_.open(reader_->path(), std::ios::binary);
@@ -27,6 +27,37 @@ public:
         if (reader_ && !reader_->index().empty()) {
             load_block(0);
             parse_current_entry();
+        }
+    }
+
+    void seek(std::string_view target) {
+        if (!reader_ || reader_->index().empty()) {
+            valid_ = false;
+            return;
+        }
+
+        // Binary search the index to find the correct data block
+        size_t left = 0, right = reader_->index().size() - 1;
+        size_t block_idx = right;
+        while (left <= right) {
+            size_t mid = left + (right - left) / 2;
+            if (reader_->index()[mid].max_key >= target) {
+                block_idx = mid;
+                if (mid == 0) break;
+                right = mid - 1;
+            } else {
+                left = mid + 1;
+            }
+        }
+
+        load_block(block_idx);
+        block_idx_ = block_idx;
+        offset_in_block_ = 0;
+        parse_current_entry();
+
+        // Linear scan inside the 4KB block until we reach or exceed the target key
+        while (valid_ && key() < target) {
+            next();
         }
     }
 
@@ -58,10 +89,10 @@ public:
 
 private:
     const SSTableReader* reader_;
-    acdb::ShardedLRUCache* cache_;
+    forgelsm::ShardedLRUCache* cache_;
 
     size_t block_idx_ = 0;
-    acdb::BlockPtr current_block_;
+    forgelsm::BlockPtr current_block_;
     size_t offset_in_block_ = 0;
     
     bool valid_ = false;
@@ -76,16 +107,10 @@ private:
         current_block_ = cache_->get(cache_key);
         if (!current_block_) {
             // Cache miss: read from disk.
-            current_block_ = std::make_shared<acdb::Block>(idx_entry.length);
-            
-            // Read using standard C I/O or platform specific
-            // Since this runs on Windows or POSIX, we can just use std::ifstream for simplicity in Iterator
-            // For production, pread is preferred, but std::ifstream with seekg is cross platform standard C++.
-            // Wait, we can use pread equivalent here if needed.
-            // But let's use standard ifstream for the iterator since it's sequential or not performance critical vs get().
-            // Actually, Windows has _lseeki64 and _read, or we can use `vlog_pread` equivalent? 
-            // Better to use a clean std::ifstream here since it's just block loading and we hold no locks.
-            if (in_.is_open()) {
+            current_block_ = std::make_shared<forgelsm::Block>(idx_entry.length);
+            if (reader_ && reader_->mapped_data()) {
+                std::memcpy(current_block_->data(), reader_->mapped_data() + idx_entry.offset, idx_entry.length);
+            } else if (in_.is_open()) {
                 in_.seekg(idx_entry.offset);
                 in_.read(current_block_->data(), idx_entry.length);
                 if (in_.fail()) {
@@ -149,4 +174,4 @@ private:
     }
 };
 
-#endif // ACDB_SSTABLE_ITERATOR_H
+#endif // FORGELSM_SSTABLE_ITERATOR_H

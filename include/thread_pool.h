@@ -1,5 +1,5 @@
-#ifndef ACDB_THREAD_POOL_H
-#define ACDB_THREAD_POOL_H
+#ifndef FORGELSM_THREAD_POOL_H
+#define FORGELSM_THREAD_POOL_H
 
 #include <vector>
 #include <queue>
@@ -9,7 +9,7 @@
 #include <functional>
 #include <stop_token>
 
-namespace acdb {
+namespace forgelsm {
 
 // A lightweight, C++20 thread pool using std::jthread.
 // Dispatches async tasks, used primarily for background flushes and compactions.
@@ -37,6 +37,6 @@ private:
     std::condition_variable_any cv_; // Used with jthread's stop_token
 };
 
-} // namespace acdb
+} // namespace forgelsm
 
-#endif // ACDB_THREAD_POOL_H
+#endif // FORGELSM_THREAD_POOL_H

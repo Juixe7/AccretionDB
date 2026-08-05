@@ -1,5 +1,5 @@
-#ifndef ACDB_VLOG_H
-#define ACDB_VLOG_H
+#ifndef FORGELSM_VLOG_H
+#define FORGELSM_VLOG_H
 
 #include <vector>
 #include <cstdint>
@@ -41,8 +41,12 @@ public:
 
     void mark_for_deletion() { marked_for_deletion_ = true; }
 
+    bool is_gc_skipped() const { return gc_skipped_; }
+    void set_gc_skipped(bool skipped) { gc_skipped_ = skipped; }
+
     // Flush to stable storage. Returns false on error.
     bool sync();
+    void close_files();
 
     // Read value at pointer. Returns false on error.
     bool read_at(const VLogPointer& pointer, std::string& out_value) const;
@@ -62,6 +66,7 @@ private:
     uint32_t    file_id_;
     uint64_t    current_offset_;   // user-space offset tracking
     bool        marked_for_deletion_ = false;
+    bool        gc_skipped_ = false;
 };
 
-#endif // ACDB_VLOG_H
+#endif // FORGELSM_VLOG_H

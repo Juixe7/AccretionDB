@@ -1,6 +1,6 @@
 #include "thread_pool.h"
 
-namespace acdb {
+namespace forgelsm {
 
 ThreadPool::ThreadPool(size_t num_threads) {
     workers_.reserve(num_threads);
@@ -55,4 +55,4 @@ void ThreadPool::worker_loop(std::stop_token stoken) {
     }
 }
 
-} // namespace acdb
+} // namespace forgelsm

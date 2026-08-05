@@ -30,7 +30,7 @@
   static constexpr int M_MODE  = 0644;
 #endif
 
-namespace acdb {
+namespace forgelsm {
 
 static bool write_all_m(int fd, const void* buf, size_t len) {
     const uint8_t* p = static_cast<const uint8_t*>(buf);
@@ -108,7 +108,7 @@ bool VersionSet::recover() {
         }
 
         for (const auto& [level, meta] : edit.new_files()) {
-            if (level < 0 || level > 1) continue;
+            if (level < 0 || level >= Version::MAX_LEVELS) continue;
             v->files_[level].push_back(meta);
         }
     }
@@ -117,9 +117,11 @@ bool VersionSet::recover() {
         return a.sequence > b.sequence; // Newest first
     });
     
-    std::sort(v->files_[1].begin(), v->files_[1].end(), [](const FileMetaData& a, const FileMetaData& b) {
-        return a.min_key < b.min_key;
-    });
+    for (int i = 1; i < Version::MAX_LEVELS; ++i) {
+        std::sort(v->files_[i].begin(), v->files_[i].end(), [](const FileMetaData& a, const FileMetaData& b) {
+            return a.min_key < b.min_key;
+        });
+    }
 
     append_version(v);
     
@@ -155,7 +157,7 @@ bool VersionSet::log_and_apply(VersionEdit* edit) {
     auto current_v = current_;
     auto new_v = std::make_shared<Version>();
     
-    for (int level = 0; level < 2; ++level) {
+    for (int level = 0; level < Version::MAX_LEVELS; ++level) {
         for (const auto& f : current_v->files_[level]) {
             bool deleted = false;
             for (const auto& [del_level, seq] : edit->deleted_files()) {
@@ -179,11 +181,14 @@ bool VersionSet::log_and_apply(VersionEdit* edit) {
     std::sort(new_v->files_[0].begin(), new_v->files_[0].end(), [](const FileMetaData& a, const FileMetaData& b) {
         return a.sequence > b.sequence;
     });
-    std::sort(new_v->files_[1].begin(), new_v->files_[1].end(), [](const FileMetaData& a, const FileMetaData& b) {
-        return a.min_key < b.min_key;
-    });
+    for (int i = 1; i < Version::MAX_LEVELS; ++i) {
+        std::sort(new_v->files_[i].begin(), new_v->files_[i].end(), [](const FileMetaData& a, const FileMetaData& b) {
+            return a.min_key < b.min_key;
+        });
+    }
 
     current_ = new_v;
+    active_versions_.push_back(new_v);
     for (const auto& [level, meta] : edit->new_files()) {
         pending_outputs_.erase(meta.sequence);
     }
@@ -196,10 +201,12 @@ bool VersionSet::log_and_apply(VersionEdit* edit) {
         if (tmp_fd >= 0) {
             VersionEdit snap;
             snap.set_next_file_sequence(next_file_number_);
-            for (int level = 0; level < 2; ++level) {
+            for (int level = 0; level < Version::MAX_LEVELS; ++level) {
+            if (!new_v->files_[level].empty()) {
                 for (const auto& f : new_v->files_[level]) {
                     snap.add_file(level, f.sequence, f.file_size, f.min_key, f.max_key);
                 }
+            }
             }
             std::string enc;
             snap.encode_to(enc);
@@ -235,10 +242,12 @@ void VersionSet::purge_obsolete_files(const std::string& db_dir) {
         auto it = active_versions_.begin();
         while (it != active_versions_.end()) {
             if (auto v = it->lock()) {
-                for (int level = 0; level < 2; ++level) {
-                    for (const auto& f : v->files_[level]) {
+                for (int level = 0; level < Version::MAX_LEVELS; ++level) {
+            if (v && !v->files_[level].empty()) {
+                for (const auto& f : v->files_[level]) {
                         live_files.insert(f.sequence);
                     }
+                }
                 }
                 ++it;
             } else {
@@ -262,4 +271,4 @@ void VersionSet::purge_obsolete_files(const std::string& db_dir) {
     }
 }
 
-} // namespace acdb
+} // namespace forgelsm

@@ -1,5 +1,5 @@
-#ifndef ACDB_ARENA_H
-#define ACDB_ARENA_H
+#ifndef FORGELSM_ARENA_H
+#define FORGELSM_ARENA_H
 
 #include <atomic>
 #include <vector>
@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <mutex>
 
-namespace acdb {
+namespace forgelsm {
 
 // A monotonic bump-pointer allocator optimized for cache locality and fast path 
 // lock-free allocation. Memory is pre-allocated in large blocks, eliminating 
@@ -56,5 +56,5 @@ private:
     std::atomic<size_t> bytes_allocated_{0};
 };
 
-} // namespace acdb
-#endif // ACDB_ARENA_H
+} // namespace forgelsm
+#endif // FORGELSM_ARENA_H

@@ -28,10 +28,10 @@ uint32_t compute_crc32(const uint8_t* data, size_t len) {
 
 uint32_t compute_crc32_incremental(uint32_t crc, const uint8_t* data, size_t len) {
     std::call_once(crc32_init_flag, init_crc32_table);
-    crc = crc ^ 0xFFFFFFFF;
+    uint32_t c = crc ^ 0xFFFFFFFF;
     for (size_t i = 0; i < len; ++i)
-        crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
-    return crc ^ 0xFFFFFFFF;
+        c = (c >> 8) ^ crc32_table[(c ^ data[i]) & 0xFF];
+    return c ^ 0xFFFFFFFF;
 }
 
 uint32_t record_checksum(uint32_t key_size, uint32_t vlog_id, uint64_t vlog_offset, uint32_t vlog_len,

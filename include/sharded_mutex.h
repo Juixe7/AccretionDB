@@ -4,7 +4,7 @@
 #include <array>
 #include <thread>
 
-namespace acdb {
+namespace forgelsm {
 
 class ShardedSharedMutex {
 private:
@@ -40,4 +40,4 @@ public:
     }
 };
 
-} // namespace acdb
+} // namespace forgelsm

@@ -1,7 +1,7 @@
 #include "version_edit.h"
 #include <cstring>
 
-namespace acdb {
+namespace forgelsm {
 
 enum Tag : uint32_t {
     kNextFileSequence = 1,
@@ -112,4 +112,4 @@ bool VersionEdit::decode_from(const std::string& src) {
     return true;
 }
 
-} // namespace acdb
+} // namespace forgelsm

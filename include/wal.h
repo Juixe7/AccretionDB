@@ -1,5 +1,5 @@
-#ifndef ACDB_WAL_H
-#define ACDB_WAL_H
+#ifndef FORGELSM_WAL_H
+#define FORGELSM_WAL_H
 
 #include <cstdint>
 #include <string>
@@ -79,4 +79,4 @@ private:
     static constexpr uint32_t MAX_FIELD_SIZE = 64u * 1024u * 1024u; // 64 MiB
 };
 
-#endif // ACDB_WAL_H
+#endif // FORGELSM_WAL_H
